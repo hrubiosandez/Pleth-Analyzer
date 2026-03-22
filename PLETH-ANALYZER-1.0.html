@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Pleth Analyzer Pro</title>
+    <style>
+        :root { --bg: #020617; --panel: #0f172a; --accent: #22d3ee; --text: #f8fafc; --blue-main: #3b82f6; --blue-hover: #2563eb; }
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 10px; display: flex; flex-direction: column; align-items: center; }
+        .container { max-width: 1000px; width: 100%; background: var(--panel); padding: 20px; border-radius: 16px; border: 1px solid #334155; }
+        .canvas-wrapper { position: relative; background: #000; border: 2px solid #1e293b; cursor: crosshair; overflow: hidden; border-radius: 12px; margin-bottom: 20px; }
+        canvas { display: block; max-width: 100%; height: auto; }
+        #selectionRect { position: absolute; border: 2px solid #fff; background: rgba(255,255,255,0.15); pointer-events: none; display: none; }
+        .toolbar { display: flex; gap: 15px; margin-bottom: 15px; align-items: center; background: #1e293b; padding: 15px; border-radius: 10px; flex-wrap: wrap; justify-content: center; }
+        .button-group { display: flex; gap: 10px; }
+        button { padding: 12px 18px; border: none; border-radius: 8px; cursor: pointer; font-weight: 700; text-transform: uppercase; font-size: 11px; transition: 0.2s; background: var(--blue-main); color: white; }
+        button:hover { background: var(--blue-hover); }
+        .btn-del { padding: 5px 12px; font-size: 11px; min-width: 35px; }
+        .control-group { display: flex; flex-direction: column; gap: 5px; min-width: 120px; }
+        label { font-size: 10px; text-transform: uppercase; color: #94a3b8; font-weight: bold; display: flex; justify-content: space-between; }
+        input[type=range] { width: 100%; accent-color: var(--accent); }
+        #status { font-size: 12px; color: #94a3b8; background: #020617; padding: 10px; border-radius: 8px; margin-bottom: 10px; border-left: 4px solid var(--accent); width: 100%; box-sizing: border-box; }
+        .results-table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 12px; background: #020617; border-radius: 8px; overflow: hidden; }
+        .results-table th { background: #1e293b; padding: 10px; text-align: left; color: var(--accent); }
+        .results-table td { padding: 10px; border-bottom: 1px solid #1e293b; }
+        .val-badge { padding: 2px 5px; border-radius: 4px; background: #334155; color: #fff; font-family: monospace; }
+        .avg-row { background: #1e293b; font-weight: bold; color: var(--accent); font-size: 14px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div id="status">1. Carga foto 2. Ajusta filtros 3. Recorta la onda</div>
+
+    <div class="canvas-wrapper">
+        <canvas id="mainCanvas"></canvas>
+        <div id="selectionRect"></div>
+    </div>
+
+    <div class="toolbar">
+        <div class="button-group">
+            <input type="file" id="fileIn" hidden accept="image/*">
+            <button onclick="document.getElementById('fileIn').click()">Galería</button>
+            <input type="file" id="camIn" hidden accept="image/*" capture="environment">
+            <button onclick="document.getElementById('camIn').click()">Cámara</button>
+        </div>
+        <div class="control-group">
+            <label>Brillo <span id="briVal">100</span>%</label>
+            <input type="range" id="briRange" min="20" max="250" value="100">
+        </div>
+        <div class="control-group">
+            <label>Saturación <span id="satVal">100</span>%</label>
+            <input type="range" id="satRange" min="0" max="300" value="100">
+        </div>
+        <div class="control-group">
+            <label>Contraste <span id="conVal">100</span>%</label>
+            <input type="range" id="conRange" min="50" max="250" value="100">
+        </div>
+    </div>
+
+    <table class="results-table">
+        <thead>
+            <tr>
+                <th>Ciclo</th>
+                <th>H (Sístole)</th>
+                <th>h (Diástole)</th>
+                <th>Relación h/H</th>
+                <th style="text-align:center">Borrar</th>
+            </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+        <tfoot>
+            <tr class="avg-row">
+                <td colspan="3" style="text-align: right; padding-right: 20px;">PROMEDIO GLOBAL:</td>
+                <td id="avgVal" colspan="2">-</td>
+            </tr>
+        </tfoot>
+    </table>
+</div>
+
+<script>
+    const canvas = document.getElementById('mainCanvas'), ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const rectUI = document.getElementById('selectionRect'), status = document.getElementById('status'), tbody = document.getElementById('tbody');
+    let imgOriginal = null, isDrawing = false, startX, startY, relacionesActivas = [];
+
+    // Motor de análisis original
+    function esPixelDeOnda(r, g, b) {
+        r /= 255; g /= 255; b /= 255;
+        const max = Math.max(r, g, b), min = Math.min(r, g, b);
+        const s = max === 0 ? 0 : (max - min) / max;
+        const v = max;
+        return (s > 0.42 && v > 0.15); 
+    }
+
+    const handleImg = (e) => {
+        const reader = new FileReader();
+        reader.onload = (f) => {
+            imgOriginal = new Image();
+            imgOriginal.onload = () => { aplicarFiltrosYRender(); status.innerText = "Imagen cargada. Selecciona la zona de ondas."; };
+            imgOriginal.src = f.target.result;
+        };
+        if (e.target.files[0]) reader.readAsDataURL(e.target.files[0]);
+    };
+
+    document.getElementById('fileIn').onchange = handleImg;
+    document.getElementById('camIn').onchange = handleImg;
+
+    function aplicarFiltrosYRender() {
+        if (!imgOriginal) return;
+        const bri = document.getElementById('briRange').value, sat = document.getElementById('satRange').value, con = document.getElementById('conRange').value;
+        document.getElementById('briVal').innerText = bri; document.getElementById('satVal').innerText = sat; document.getElementById('conVal').innerText = con;
+        canvas.width = imgOriginal.width; canvas.height = imgOriginal.height;
+        ctx.filter = `brightness(${bri}%) saturate(${sat}%) contrast(${con}%)`;
+        ctx.drawImage(imgOriginal, 0, 0); ctx.filter = "none";
+    }
+
+    ["briRange", "satRange", "conRange"].forEach(id => document.getElementById(id).oninput = aplicarFiltrosYRender);
+
+    const getEvPos = (e) => {
+        const r = canvas.getBoundingClientRect();
+        const cX = e.touches ? e.touches[0].clientX : e.clientX;
+        const cY = e.touches ? e.touches[0].clientY : e.clientY;
+        return { x: cX - r.left, y: cY - r.top };
+    };
+
+    canvas.onmousedown = canvas.ontouchstart = (e) => { if (!imgOriginal) return; isDrawing = true; const p = getEvPos(e); startX = p.x; startY = p.y; rectUI.style.display = 'block'; };
+    window.onmousemove = window.ontouchmove = (e) => {
+        if (!isDrawing) return; const p = getEvPos(e);
+        let w = p.x - startX, h = p.y - startY;
+        rectUI.style.width = Math.abs(w) + "px"; rectUI.style.height = Math.abs(h) + "px";
+        rectUI.style.left = (w > 0 ? startX : p.x) + "px"; rectUI.style.top = (h > 0 ? startY : p.y) + "px";
+    };
+    window.onmouseup = window.ontouchend = () => {
+        if (!isDrawing) return; isDrawing = false;
+        const r = canvas.getBoundingClientRect(), scale = canvas.width / r.width;
+        const area = { x: parseInt(rectUI.style.left) * scale, y: parseInt(rectUI.style.top) * scale, w: parseInt(rectUI.style.width) * scale, h: parseInt(rectUI.style.height) * scale };
+        rectUI.style.display = 'none'; analizarHitos(area);
+    };
+
+    function eliminarFila(btn, valor) {
+        const fila = btn.parentNode.parentNode;
+        fila.parentNode.removeChild(fila);
+        relacionesActivas = relacionesActivas.filter(r => r !== valor);
+        actualizarPromedio();
+    }
+
+    function actualizarPromedio() {
+        if (relacionesActivas.length > 0) {
+            const sum = relacionesActivas.reduce((a, b) => a + b, 0);
+            document.getElementById('avgVal').innerText = (sum / relacionesActivas.length).toFixed(2);
+        } else {
+            document.getElementById('avgVal').innerText = "-";
+        }
+    }
+
+    function analizarHitos(area) {
+        aplicarFiltrosYRender();
+        tbody.innerHTML = "";
+        relacionesActivas = [];
+        const imgData = ctx.getImageData(area.x, area.y, area.w, area.h);
+        const pixels = imgData.data;
+        let points = [];
+
+        for (let x = 0; x < area.w; x++) {
+            let foundY = null;
+            for (let y = 0; y < area.h; y++) {
+                const i = (y * Math.floor(area.w) + x) * 4;
+                if (esPixelDeOnda(pixels[i], pixels[i+1], pixels[i+2])) {
+                    foundY = y + area.y;
+                    break; 
+                }
+            }
+            if (foundY) points.push({x: x + area.x, y: foundY});
+        }
+
+        if (points.length < 20) return;
+        let smooth = [];
+        for (let i = 0; i < points.length; i++) {
+            let sumY = 0, count = 0;
+            for (let j = i - 4; j <= i + 4; j++) { if (points[j]) { sumY += points[j].y; count++; } }
+            smooth.push({x: points[i].x, y: sumY / count});
+        }
+
+        // Línea de la onda suavizada
+        ctx.strokeStyle = "#a855f7"; ctx.lineWidth = 3; ctx.beginPath();
+        ctx.moveTo(smooth[0].x, smooth[0].y); smooth.forEach(p => ctx.lineTo(p.x, p.y)); ctx.stroke();
+
+        const valles = [], picos = [], win = 30;
+        for (let i = win; i < smooth.length - win; i++) {
+            let esMax = true, esMin = true;
+            for (let j = i - win; j <= i + win; j++) {
+                if (smooth[j].y < smooth[i].y) esMax = false;
+                if (smooth[j].y > smooth[i].y) esMin = false;
+            }
+            if (esMax && (picos.length === 0 || smooth[i].x - picos[picos.length-1].x > 45)) picos.push(smooth[i]);
+            if (esMin && (valles.length === 0 || smooth[i].x - valles[valles.length-1].x > 45)) valles.push(smooth[i]);
+        }
+
+        valles.forEach((vBase, idx) => {
+            if (idx % 2 !== 0) return; 
+            
+            // GROSOR DETERMINADO: 6px para inicio, 3px para hitos internos (el doble)
+            ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 6;
+            ctx.beginPath(); ctx.moveTo(vBase.x, area.y); ctx.lineTo(vBase.x, area.y + area.h); ctx.stroke();
+
+            const limiteX = valles[idx+2] ? valles[idx+2].x : area.x + area.w;
+            const subHitos = [...picos, ...valles].filter(p => p.x > vBase.x && p.x < limiteX).sort((a,b) => a.x - b.x);
+            
+            let vals = { s: 0, v: 0, d: 0 };
+            ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 3; // Mitad del grosor del inicio
+
+            subHitos.slice(0, 3).forEach((h, hIdx) => {
+                ctx.beginPath(); ctx.moveTo(h.x, area.y); ctx.lineTo(h.x, area.y + area.h); ctx.stroke();
+                let hRel = Math.abs(vBase.y - h.y).toFixed(1);
+                if (hIdx === 0) vals.s = hRel;
+                if (hIdx === 2) vals.d = hRel;
+            });
+
+            const rel = vals.s > 0 ? parseFloat((vals.d / vals.s).toFixed(2)) : 0;
+            if(rel > 0) {
+                relacionesActivas.push(rel);
+                tbody.innerHTML += `<tr>
+                    <td>#${(idx/2)+1}</td>
+                    <td><span class="val-badge">${vals.s}</span></td>
+                    <td><span class="val-badge">${vals.d}</span></td>
+                    <td style="color:var(--accent); font-weight:bold">${rel.toFixed(2)}</td>
+                    <td style="text-align:center"><button class="btn-del" onclick="eliminarFila(this, ${rel})">X</button></td>
+                </tr>`;
+            }
+        });
+        actualizarPromedio();
+    }
+</script>
+</body>
+</html>

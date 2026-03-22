@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Pleth Analyzer Pro Mobile</title>
+    <style>
+        :root { 
+            --bg: #020617; --panel: #0f172a; --accent: #22d3ee; --text: #f8fafc; 
+            --blue-main: #3b82f6; --blue-hover: #2563eb; --safe-bottom: env(safe-area-inset-bottom);
+        }
+        
+        * { touch-action: manipulation; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+        body { 
+            font-family: system-ui, -apple-system, sans-serif; 
+            background: var(--bg); color: var(--text); margin: 0; padding: 10px;
+            display: flex; flex-direction: column; align-items: center;
+            overflow-x: hidden;
+        }
+
+        .container { max-width: 100%; width: 100%; background: var(--panel); padding: 15px; border-radius: 12px; border: 1px solid #334155; }
+
+        /* Optimización de Canvas para Móvil */
+        .canvas-wrapper { 
+            position: relative; background: #000; border: 2px solid #1e293b; 
+            border-radius: 8px; margin-bottom: 15px; width: 100%;
+            touch-action: none; /* Crucial para iPhone: evita que la página haga scroll al dibujar */
+        }
+        canvas { display: block; width: 100%; height: auto; }
+        #selectionRect { position: absolute; border: 2px solid #fff; background: rgba(255,255,255,0.2); pointer-events: none; display: none; z-index: 10; }
+
+        /* Toolbar Responsive */
+        .toolbar { 
+            display: grid; grid-template-columns: 1fr 1fr; gap: 12px; 
+            margin-bottom: 15px; background: #1e293b; padding: 12px; border-radius: 10px; 
+        }
+
+        .button-group { grid-column: span 2; display: flex; gap: 8px; }
+        button { 
+            flex: 1; padding: 14px 10px; border: none; border-radius: 8px; 
+            font-weight: 700; text-transform: uppercase; font-size: 11px;
+            background: var(--blue-main); color: white;
+        }
+
+        .control-group { display: flex; flex-direction: column; gap: 8px; }
+        label { font-size: 9px; text-transform: uppercase; color: #94a3b8; font-weight: bold; }
+        
+        /* Sliders más fáciles de tocar */
+        input[type=range] { width: 100%; height: 25px; accent-color: var(--accent); }
+
+        #status { 
+            font-size: 11px; color: #94a3b8; background: #020617; padding: 10px; 
+            border-radius: 8px; margin-bottom: 10px; border-left: 3px solid var(--accent); 
+        }
+
+        /* Tabla Adaptada */
+        .table-container { width: 100%; overflow-x: auto; border-radius: 8px; }
+        .results-table { width: 100%; border-collapse: collapse; font-size: 11px; background: #020617; min-width: 400px; }
+        .results-table th { background: #1e293b; padding: 10px; color: var(--accent); text-align: center; }
+        .results-table td { padding: 12px 8px; border-bottom: 1px solid #1e293b; text-align: center; }
+        
+        .val-badge { padding: 3px 6px; border-radius: 4px; background: #334155; color: #fff; font-family: monospace; font-size: 12px; }
+        .btn-del { background: var(--blue-main); width: 35px; height: 35px; border-radius: 50%; padding: 0; line-height: 35px; }
+
+        .avg-row { background: #1e293b; font-weight: bold; color: var(--accent); font-size: 13px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div id="status">Paso 1: Cámara/Galería. Paso 2: Ajusta y Recorta sobre la onda.</div>
+
+    <div class="canvas-wrapper" id="wrapper">
+        <canvas id="mainCanvas"></canvas>
+        <div id="selectionRect"></div>
+    </div>
+
+    <div class="toolbar">
+        <div class="button-group">
+            <input type="file" id="fileIn" hidden accept="image/*">
+            <button onclick="document.getElementById('fileIn').click()">Galería</button>
+            <input type="file" id="camIn" hidden accept="image/*" capture="environment">
+            <button onclick="document.getElementById('camIn').click()">Cámara</button>
+        </div>
+        
+        <div class="control-group">
+            <label>Brillo <span id="briVal">100</span>%</label>
+            <input type="range" id="briRange" min="20" max="250" value="100">
+        </div>
+        <div class="control-group">
+            <label>Saturación <span id="satVal">100</span>%</label>
+            <input type="range" id="satRange" min="0" max="300" value="100">
+        </div>
+    </div>
+
+    <div class="table-container">
+        <table class="results-table">
+            <thead>
+                <tr>
+                    <th>Ciclo</th>
+                    <th>H (Síst)</th>
+                    <th>h (Diást)</th>
+                    <th>h/H</th>
+                    <th>X</th>
+                </tr>
+            </thead>
+            <tbody id="tbody"></tbody>
+            <tfoot>
+                <tr class="avg-row">
+                    <td colspan="3" style="text-align: right; padding-right: 15px;">PROMEDIO:</td>
+                    <td id="avgVal" colspan="2" style="text-align: left;">-</td>
+                </tr>
+            </tfoot>
+        </table>
+    </div>
+</div>
+
+<script>
+    const canvas = document.getElementById('mainCanvas'), ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const rectUI = document.getElementById('selectionRect'), status = document.getElementById('status'), tbody = document.getElementById('tbody');
+    let imgOriginal = null, isDrawing = false, startX, startY, relacionesActivas = [];
+
+    function esPixelDeOnda(r, g, b) {
+        r /= 255; g /= 255; b /= 255;
+        const max = Math.max(r, g, b), min = Math.min(r, g, b);
+        const s = max === 0 ? 0 : (max - min) / max;
+        const v = max;
+        return (s > 0.42 && v > 0.15); 
+    }
+
+    const handleImg = (e) => {
+        if (!e.target.files[0]) return;
+        const reader = new FileReader();
+        reader.onload = (f) => {
+            imgOriginal = new Image();
+            imgOriginal.onload = () => {
+                aplicarFiltrosYRender();
+                status.innerText = "Imagen cargada. Desliza el dedo para recortar la onda.";
+            };
+            imgOriginal.src = f.target.result;
+        };
+        reader.readAsDataURL(e.target.files[0]);
+    };
+
+    document.getElementById('fileIn').onchange = handleImg;
+    document.getElementById('camIn').onchange = handleImg;
+
+    function aplicarFiltrosYRender() {
+        if (!imgOriginal) return;
+        const bri = document.getElementById('briRange').value, sat = document.getElementById('satRange').value;
+        document.getElementById('briVal').innerText = bri; document.getElementById('satVal').innerText = sat;
+        
+        // Mantener proporción original en móvil
+        const aspect = imgOriginal.height / imgOriginal.width;
+        canvas.width = 1000; // Resolución interna fija para análisis consistente
+        canvas.height = 1000 * aspect;
+        
+        ctx.filter = `brightness(${bri}%) saturate(${sat}%) contrast(110%)`;
+        ctx.drawImage(imgOriginal, 0, 0, canvas.width, canvas.height);
+        ctx.filter = "none";
+    }
+
+    document.getElementById('briRange').oninput = aplicarFiltrosYRender;
+    document.getElementById('satRange').oninput = aplicarFiltrosYRender;
+
+    // Lógica Táctil Unificada (Xiaomi/iPhone/Samsung)
+    const getEvPos = (e) => {
+        const r = canvas.getBoundingClientRect();
+        const t = e.touches ? e.touches[0] : e;
+        return { 
+            x: (t.clientX - r.left) * (canvas.width / r.width),
+            y: (t.clientY - r.top) * (canvas.height / r.height),
+            rawX: t.clientX - r.left,
+            rawY: t.clientY - r.top
+        };
+    };
+
+    const startDraw = (e) => { 
+        if (!imgOriginal) return; 
+        isDrawing = true; 
+        const p = getEvPos(e); 
+        startX = p.x; startY = p.y; 
+        rectUI.style.display = 'block';
+        rectUI.style.left = p.rawX + "px";
+        rectUI.style.top = p.rawY + "px";
+        rectUI.style.width = "0px";
+        rectUI.style.height = "0px";
+    };
+
+    const moveDraw = (e) => {
+        if (!isDrawing) return;
+        e.preventDefault(); // Bloquea el scroll del móvil
+        const p = getEvPos(e);
+        const r = canvas.getBoundingClientRect();
+        const scale = r.width / canvas.width;
+        
+        let curRawX = p.rawX, curRawY = p.rawY;
+        let startRawX = startX * scale, startRawY = startY * scale;
+
+        rectUI.style.width = Math.abs(curRawX - startRawX) + "px";
+        rectUI.style.height = Math.abs(curRawY - startRawY) + "px";
+        rectUI.style.left = (curRawX > startRawX ? startRawX : curRawX) + "px";
+        rectUI.style.top = (curRawY > startRawY ? startRawY : curRawY) + "px";
+    };
+
+    const endDraw = () => {
+        if (!isDrawing) return;
+        isDrawing = false;
+        const r = canvas.getBoundingClientRect();
+        const scale = canvas.width / r.width;
+        const area = {
+            x: parseFloat(rectUI.style.left) * scale,
+            y: parseFloat(rectUI.style.top) * scale,
+            w: parseFloat(rectUI.style.width) * scale,
+            h: parseFloat(rectUI.style.height) * scale
+        };
+        rectUI.style.display = 'none';
+        if (area.w > 10) analizarHitos(area);
+    };
+
+    canvas.addEventListener('touchstart', startDraw, {passive: false});
+    window.addEventListener('touchmove', moveDraw, {passive: false});
+    window.addEventListener('touchend', endDraw);
+    canvas.onmousedown = startDraw; window.onmousemove = moveDraw; window.onmouseup = endDraw;
+
+    function eliminarFila(btn, valor) {
+        btn.closest('tr').remove();
+        relacionesActivas = relacionesActivas.filter(r => r !== valor);
+        actualizarPromedio();
+    }
+
+    function actualizarPromedio() {
+        const avg = relacionesActivas.length > 0 ? (relacionesActivas.reduce((a,b)=>a+b,0)/relacionesActivas.length).toFixed(2) : "-";
+        document.getElementById('avgVal').innerText = avg;
+    }
+
+    function analizarHitos(area) {
+        aplicarFiltrosYRender();
+        tbody.innerHTML = ""; relacionesActivas = [];
+        const data = ctx.getImageData(area.x, area.y, area.w, area.h).data;
+        let points = [];
+
+        for (let x = 0; x < area.w; x++) {
+            let foundY = null;
+            for (let y = 0; y < area.h; y++) {
+                const i = (y * Math.floor(area.w) + x) * 4;
+                if (esPixelDeOnda(data[i], data[i+1], data[i+2])) { foundY = y + area.y; break; }
+            }
+            if (foundY) points.push({x: x + area.x, y: foundY});
+        }
+
+        if (points.length < 20) return;
+        let smooth = [];
+        for (let i = 0; i < points.length; i++) {
+            let sumY = 0, count = 0;
+            for (let j = i-4; j<=i+4; j++) { if(points[j]) {sumY+=points[j].y; count++;} }
+            smooth.push({x: points[i].x, y: sumY/count});
+        }
+
+        ctx.strokeStyle = "#a855f7"; ctx.lineWidth = 3; ctx.beginPath();
+        ctx.moveTo(smooth[0].x, smooth[0].y); smooth.forEach(p => ctx.lineTo(p.x, p.y)); ctx.stroke();
+
+        const valles = [], picos = [], win = 25;
+        for (let i = win; i < smooth.length - win; i++) {
+            let esMax = true, esMin = true;
+            for (let j = i - win; j <= i + win; j++) {
+                if (smooth[j].y < smooth[i].y) esMax = false;
+                if (smooth[j].y > smooth[i].y) esMin = false;
+            }
+            if (esMax && (picos.length === 0 || smooth[i].x - picos[picos.length-1].x > 40)) picos.push(smooth[i]);
+            if (esMin && (valles.length === 0 || smooth[i].x - valles[valles.length-1].x > 40)) valles.push(smooth[i]);
+        }
+
+        valles.forEach((vBase, idx) => {
+            if (idx % 2 !== 0) return; 
+            ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 6;
+            ctx.beginPath(); ctx.moveTo(vBase.x, area.y); ctx.lineTo(vBase.x, area.y + area.h); ctx.stroke();
+            const limiteX = valles[idx+2] ? valles[idx+2].x : area.x + area.w;
+            const sub = [...picos, ...valles].filter(p => p.x > vBase.x && p.x < limiteX).sort((a,b)=>a.x-b.x);
+            let s=0, d=0;
+            ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 3;
+            sub.slice(0, 3).forEach((h, hi) => {
+                ctx.beginPath(); ctx.moveTo(h.x, area.y); ctx.lineTo(h.x, area.y+area.h); ctx.stroke();
+                let val = Math.abs(vBase.y - h.y);
+                if (hi === 0) s = val; if (hi === 2) d = val;
+            });
+            const rel = s > 0 ? parseFloat((d/s).toFixed(2)) : 0;
+            if(rel > 0) {
+                relacionesActivas.push(rel);
+                tbody.innerHTML += `<tr><td>#${(idx/2)+1}</td><td>${s.toFixed(1)}</td><td>${d.toFixed(1)}</td><td style="color:var(--accent); font-weight:bold">${rel.toFixed(2)}</td><td><button class="btn-del" onclick="eliminarFila(this, ${rel})">X</button></td></tr>`;
+            }
+        });
+        actualizarPromedio();
+    }
+</script>
+</body>
+</html>

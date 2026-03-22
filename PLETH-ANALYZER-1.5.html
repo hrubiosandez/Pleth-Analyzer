@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Pleth Analyzer Pro Mobile</title>
+    <style>
+        :root { 
+            --bg: #020617; --panel: #0f172a; --accent: #22d3ee; --text: #f8fafc; 
+            --blue-main: #3b82f6; --blue-hover: #2563eb;
+        }
+        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        
+        body { 
+            font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); 
+            margin: 0; padding: 10px; display: flex; flex-direction: column; align-items: center;
+            overflow-x: hidden;
+        }
+
+        .container { width: 100%; max-width: 500px; background: var(--panel); padding: 15px; border-radius: 12px; border: 1px solid #334155; }
+
+        /* Visor de Imagen con soporte Zoom/Pan */
+        .viewport { 
+            width: 100%; height: 320px; background: #000; border-radius: 8px; 
+            overflow: hidden; position: relative; border: 2px solid #1e293b; margin-bottom: 15px;
+            touch-action: none; 
+        }
+        #canvasWrapper { position: absolute; transform-origin: 0 0; }
+        #selectionRect { 
+            position: absolute; border: 2px solid #fff; background: rgba(255,255,255,0.2); 
+            pointer-events: none; display: none; z-index: 100; 
+        }
+
+        /* Botones Principales */
+        .btn-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 15px; }
+        button { 
+            padding: 14px 5px; border: none; border-radius: 8px; font-weight: 700; 
+            font-size: 10px; text-transform: uppercase; background: var(--blue-main); color: white;
+        }
+
+        /* Sliders Verticales */
+        .controls-stack { display: flex; flex-direction: column; gap: 10px; background: #1e293b; padding: 15px; border-radius: 10px; margin-bottom: 15px; }
+        .control-group { display: flex; flex-direction: column; gap: 4px; }
+        .control-group label { font-size: 9px; font-weight: bold; color: #94a3b8; text-transform: uppercase; display: flex; justify-content: space-between; }
+        input[type=range] { width: 100%; height: 35px; accent-color: var(--accent); touch-action: pan-x; }
+
+        /* Tabla con Desplazamiento Táctil */
+        .table-scroll { 
+            width: 100%; overflow-x: auto; background: #020617; border-radius: 8px; 
+            border: 1px solid #334155; touch-action: pan-x;
+            -webkit-overflow-scrolling: touch;
+        }
+        .table-scroll::-webkit-scrollbar { height: 6px; }
+        .table-scroll::-webkit-scrollbar-thumb { background: var(--blue-main); border-radius: 3px; }
+
+        .results-table { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 480px; }
+        .results-table th { background: #1e293b; padding: 12px 5px; color: var(--accent); text-align: center; }
+        .results-table td { padding: 12px 5px; border-bottom: 1px solid #1e293b; text-align: center; }
+        
+        .val-badge { padding: 4px 6px; border-radius: 4px; background: #334155; font-family: monospace; font-size: 13px; }
+        .btn-del { background: var(--blue-main); width: 34px; height: 34px; border-radius: 50%; font-weight: bold; font-size: 14px; }
+        
+        .avg-row { background: #1e293b; font-weight: bold; font-size: 15px; color: var(--accent); }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="viewport" id="viewport">
+        <div id="canvasWrapper">
+            <canvas id="mainCanvas"></canvas>
+            <div id="selectionRect"></div>
+        </div>
+    </div>
+
+    <div class="btn-grid">
+        <input type="file" id="fileIn" hidden accept="image/*">
+        <button onclick="document.getElementById('fileIn').click()">Galería</button>
+        <input type="file" id="camIn" hidden accept="image/*" capture="environment">
+        <button onclick="document.getElementById('camIn').click()">Cámara</button>
+        <button onclick="resetView()" style="background:#475569">Reset Vista</button>
+    </div>
+
+    <div class="controls-stack">
+        <div class="control-group">
+            <label>Brillo <span id="briVal">100%</span></label>
+            <input type="range" id="briRange" min="20" max="250" value="100">
+        </div>
+        <div class="control-group">
+            <label>Saturación <span id="satVal">100%</span></label>
+            <input type="range" id="satRange" min="0" max="300" value="100">
+        </div>
+        <div class="control-group">
+            <label>Contraste <span id="conVal">100%</span></label>
+            <input type="range" id="conRange" min="40" max="250" value="100">
+        </div>
+    </div>
+
+    <div class="table-scroll">
+        <table class="results-table">
+            <thead>
+                <tr>
+                    <th>Ciclo</th>
+                    <th>H (Sístole)</th>
+                    <th>h (Diástole)</th>
+                    <th>Relación h/H</th>
+                    <th>Borrar</th>
+                </tr>
+            </thead>
+            <tbody id="tbody"></tbody>
+            <tfoot>
+                <tr class="avg-row">
+                    <td colspan="3" style="text-align: right; padding-right: 20px;">PROMEDIO:</td>
+                    <td id="avgVal" colspan="2" style="text-align: left;">-</td>
+                </tr>
+            </tfoot>
+        </table>
+    </div>
+</div>
+
+<script>
+    const canvas = document.getElementById('mainCanvas'), ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const wrapper = document.getElementById('canvasWrapper'), viewport = document.getElementById('viewport');
+    const rectUI = document.getElementById('selectionRect'), tbody = document.getElementById('tbody');
+    
+    let imgOriginal = null, relacionesActivas = [];
+    let scale = 1, offsetX = 0, offsetY = 0;
+    let isDrawing = false, startX, startY;
+    let tp = { dist: 0, scale: 1, x: 0, y: 0 }; 
+
+    // --- EL MOTOR DE ANÁLISIS QUE SOLICITASTE MANTENER ---
+    function esPixelDeOnda(r, g, b) {
+        r /= 255; g /= 255; b /= 255;
+        const max = Math.max(r, g, b), min = Math.min(r, g, b);
+        const s = max === 0 ? 0 : (max - min) / max;
+        const v = max;
+        return (s > 0.42 && v > 0.15); 
+    }
+
+    const handleImg = (e) => {
+        if (!e.target.files[0]) return;
+        const reader = new FileReader();
+        reader.onload = (f) => {
+            imgOriginal = new Image();
+            imgOriginal.onload = () => {
+                canvas.width = imgOriginal.width; 
+                canvas.height = imgOriginal.height;
+                resetView();
+                aplicarFiltrosYRender();
+            };
+            imgOriginal.src = f.target.result;
+        };
+        reader.readAsDataURL(e.target.files[0]);
+    };
+    document.getElementById('fileIn').onchange = handleImg;
+    document.getElementById('camIn').onchange = handleImg;
+
+    function aplicarFiltrosYRender() {
+        if (!imgOriginal) return;
+        const bri = document.getElementById('briRange').value;
+        const sat = document.getElementById('satRange').value;
+        const con = document.getElementById('conRange').value;
+        document.getElementById('briVal').innerText = bri + "%";
+        document.getElementById('satVal').innerText = sat + "%";
+        document.getElementById('conVal').innerText = con + "%";
+        
+        ctx.filter = `brightness(${bri}%) saturate(${sat}%) contrast(${con}%)`;
+        ctx.drawImage(imgOriginal, 0, 0); 
+        ctx.filter = "none";
+        wrapper.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
+    }
+    ["briRange", "satRange", "conRange"].forEach(id => document.getElementById(id).oninput = aplicarFiltrosYRender);
+
+    function resetView() {
+        if(!imgOriginal) return;
+        scale = viewport.clientWidth / canvas.width;
+        offsetX = 0; offsetY = 0;
+        aplicarFiltrosYRender();
+    }
+
+    // --- GESTOS: 1 DEDO RECORTA / 2 DEDOS ZOOM+PAN ---
+    viewport.addEventListener('touchstart', (e) => {
+        if (e.touches.length === 1) {
+            isDrawing = true;
+            const r = wrapper.getBoundingClientRect();
+            startX = (e.touches[0].clientX - r.left) / scale;
+            startY = (e.touches[0].clientY - r.top) / scale;
+            rectUI.style.display = 'block';
+        } else if (e.touches.length === 2) {
+            isDrawing = false;
+            rectUI.style.display = 'none';
+            tp.dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+            tp.scale = scale;
+            tp.x = e.touches[0].clientX - offsetX;
+            tp.y = e.touches[0].clientY - offsetY;
+        }
+    }, {passive: false});
+
+    viewport.addEventListener('touchmove', (e) => {
+        if (e.touches.length === 1 && isDrawing) {
+            e.preventDefault();
+            const r = wrapper.getBoundingClientRect();
+            let curX = (e.touches[0].clientX - r.left) / scale;
+            let curY = (e.touches[0].clientY - r.top) / scale;
+            rectUI.style.width = Math.abs(curX - startX) + "px";
+            rectUI.style.height = Math.abs(curY - startY) + "px";
+            rectUI.style.left = Math.min(curX, startX) + "px";
+            rectUI.style.top = Math.min(curY, startY) + "px";
+        } else if (e.touches.length === 2) {
+            e.preventDefault();
+            const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+            scale = tp.scale * (dist / tp.dist);
+            offsetX = e.touches[0].clientX - tp.x;
+            offsetY = e.touches[0].clientY - tp.y;
+            aplicarFiltrosYRender();
+        }
+    }, {passive: false});
+
+    viewport.addEventListener('touchend', () => {
+        if (isDrawing) {
+            isDrawing = false;
+            const area = { 
+                x: parseFloat(rectUI.style.left), 
+                y: parseFloat(rectUI.style.top), 
+                w: parseFloat(rectUI.style.width), 
+                h: parseFloat(rectUI.style.height) 
+            };
+            rectUI.style.display = 'none';
+            if (area.w > 5) analizarHitos(area);
+        }
+    });
+
+    // --- ANALISIS DE HITOS BASADO EN TU CODIGO ORIGINAL ---
+    function analizarHitos(area) {
+        aplicarFiltrosYRender();
+        tbody.innerHTML = "";
+        relacionesActivas = [];
+        const imgData = ctx.getImageData(area.x, area.y, area.w, area.h);
+        const pixels = imgData.data;
+        let points = [];
+
+        for (let x = 0; x < area.w; x++) {
+            let foundY = null;
+            for (let y = 0; y < area.h; y++) {
+                const i = (y * Math.floor(area.w) + x) * 4;
+                if (esPixelDeOnda(pixels[i], pixels[i+1], pixels[i+2])) {
+                    foundY = y + area.y;
+                    break; 
+                }
+            }
+            if (foundY) points.push({x: x + area.x, y: foundY});
+        }
+
+        if (points.length < 15) return;
+        let smooth = [];
+        for (let i = 0; i < points.length; i++) {
+            let sumY = 0, count = 0;
+            for (let j = i - 4; j <= i + 4; j++) { if (points[j]) { sumY += points[j].y; count++; } }
+            smooth.push({x: points[i].x, y: sumY / count});
+        }
+
+        const valles = [], picos = [], win = 30;
+        for (let i = win; i < smooth.length - win; i++) {
+            let esMax = true, esMin = true;
+            for (let j = i - win; j <= i + win; j++) {
+                if (smooth[j].y < smooth[i].y) esMax = false;
+                if (smooth[j].y > smooth[i].y) esMin = false;
+            }
+            if (esMax && (picos.length === 0 || smooth[i].x - picos[picos.length-1].x > 45)) picos.push(smooth[i]);
+            if (esMin && (valles.length === 0 || smooth[i].x - valles[valles.length-1].x > 45)) valles.push(smooth[i]);
+        }
+
+        valles.forEach((vBase, idx) => {
+            if (idx % 2 !== 0) return; 
+            ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 6; // Línea de inicio doble grosor
+            ctx.beginPath(); ctx.moveTo(vBase.x, area.y); ctx.lineTo(vBase.x, area.y + area.h); ctx.stroke();
+
+            const limiteX = valles[idx+2] ? valles[idx+2].x : area.x + area.w;
+            const subHitos = [...picos, ...valles].filter(p => p.x > vBase.x && p.x < limiteX).sort((a,b) => a.x - b.x);
+            
+            let vals = { s: 0, d: 0 };
+            ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 3; // Hitos internos mitad de grosor
+
+            subHitos.slice(0, 3).forEach((h, hIdx) => {
+                ctx.beginPath(); ctx.moveTo(h.x, area.y); ctx.lineTo(h.x, area.y + area.h); ctx.stroke();
+                let hRel = Math.abs(vBase.y - h.y);
+                if (hIdx === 0) vals.s = hRel;
+                if (hIdx === 2) vals.d = hRel;
+            });
+
+            const rel = vals.s > 0 ? parseFloat((vals.d / vals.s).toFixed(2)) : 0;
+            if(rel > 0) {
+                relacionesActivas.push(rel);
+                const tr = document.createElement('tr');
+                tr.innerHTML = `<td>#${(idx/2)+1}</td><td><span class="val-badge">${vals.s.toFixed(1)}</span></td><td><span class="val-badge">${vals.d.toFixed(1)}</span></td><td style="color:var(--accent); font-weight:bold">${rel.toFixed(2)}</td><td><button class="btn-del" onclick="eliminarFila(this, ${rel})">X</button></td>`;
+                tbody.appendChild(tr);
+            }
+        });
+        actualizarPromedio();
+    }
+
+    function eliminarFila(btn, valor) {
+        btn.closest('tr').remove();
+        relacionesActivas = relacionesActivas.filter(r => r !== valor);
+        actualizarPromedio();
+    }
+
+    function actualizarPromedio() {
+        const rows = Array.from(tbody.querySelectorAll('td:nth-child(4)')).map(td => parseFloat(td.innerText));
+        document.getElementById('avgVal').innerText = rows.length > 0 ? (rows.reduce((a,b)=>a+b,0)/rows.length).toFixed(2) : "-";
+    }
+</script>
+</body>
+</html>
